@@ -75,6 +75,62 @@ fn resolve_segments(path: &str) -> Option<PathBuf> {
     Some(rel)
 }
 
+/// Split a `PATH_INFO`-style URL path at its first PHP-source segment - the
+/// non-greedy half of nginx's `fastcgi_split_path_info ^(.+?\.php)(/.*)$` -
+/// into the candidate script path and the decoded `PATH_INFO` remainder
+/// (always starting with `/`).
+///
+/// `None` when no segment before the last is PHP source (a plain `/foo.php`
+/// has no remainder and is not a split), or when the script half fails the
+/// same percent-decoding/traversal guard as [`static_candidate`]. Remainder
+/// segments are decoded with the same escapes rule but deliberately allow
+/// `.`/`..` - `PATH_INFO` is opaque data for the script, not a filesystem
+/// path - while still refusing embedded `/`, `\`, and NUL after decoding. A
+/// trailing `/` on the request survives into the remainder, matching what
+/// nginx's regex captures. The caller must still verify the script half is a
+/// real, on-disk file before trusting the split.
+#[must_use]
+pub fn php_split_candidate(url_path: &str) -> Option<(PathBuf, String)> {
+    let path = url_path.split('?').next().unwrap_or(url_path);
+    let trailing_slash = path.len() > 1 && path.ends_with('/');
+
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+
+    // First segment that looks like PHP source, excluding the last: a
+    // trailing PHP segment is the plain exact-match case, not a split.
+    let split_at = segments
+        .iter()
+        .take(segments.len().saturating_sub(1))
+        .position(|raw| percent_decode(raw).is_some_and(|seg| is_php_source(Path::new(&seg))))?;
+
+    let mut script = PathBuf::new();
+    for raw in segments.get(..=split_at)? {
+        let seg = percent_decode(raw)?;
+        if seg.is_empty() || seg == "." || seg == ".." {
+            return None;
+        }
+        if seg.bytes().any(|b| b == b'/' || b == b'\\' || b == 0) {
+            return None;
+        }
+        script.push(seg);
+    }
+
+    let mut info = String::new();
+    for raw in segments.get(split_at + 1..)? {
+        let seg = percent_decode(raw)?;
+        if seg.bytes().any(|b| b == b'/' || b == b'\\' || b == 0) {
+            return None;
+        }
+        info.push('/');
+        info.push_str(&seg);
+    }
+    if trailing_slash {
+        info.push('/');
+    }
+
+    Some((script, info))
+}
+
 /// Whether `path` looks like PHP source - these must never be served as a static
 /// file (it would leak source), so the front controller handles them instead.
 #[must_use]
@@ -235,6 +291,56 @@ mod tests {
         assert_eq!(directory_candidate("/foo/../../bar/"), None);
         assert_eq!(directory_candidate("/%2e%2e/"), None);
         assert_eq!(directory_candidate("/foo%2fbar/"), None);
+    }
+
+    #[test]
+    fn php_split_finds_first_php_segment() {
+        assert_eq!(
+            php_split_candidate("/theme/styles.php/moove/123/all"),
+            Some((
+                PathBuf::from("theme/styles.php"),
+                "/moove/123/all".to_owned()
+            ))
+        );
+        assert_eq!(
+            php_split_candidate("/lib/javascript.php/1/lib/javascript-static.js"),
+            Some((
+                PathBuf::from("lib/javascript.php"),
+                "/1/lib/javascript-static.js".to_owned()
+            ))
+        );
+        // Non-greedy: split at the first PHP segment, like nginx's `.+?\.php`.
+        assert_eq!(
+            php_split_candidate("/a.php/b.php/c"),
+            Some((PathBuf::from("a.php"), "/b.php/c".to_owned()))
+        );
+    }
+
+    #[test]
+    fn php_split_keeps_trailing_slash_and_decodes() {
+        assert_eq!(
+            php_split_candidate("/file.php/dir/"),
+            Some((PathBuf::from("file.php"), "/dir/".to_owned()))
+        );
+        assert_eq!(
+            php_split_candidate("/file.php/my%20arg?x=1"),
+            Some((PathBuf::from("file.php"), "/my arg".to_owned()))
+        );
+    }
+
+    #[test]
+    fn php_split_ignores_plain_and_non_php_paths() {
+        assert_eq!(php_split_candidate("/wp-login.php"), None);
+        assert_eq!(php_split_candidate("/assets/app.css"), None);
+        assert_eq!(php_split_candidate("/foo/bar"), None);
+        assert_eq!(php_split_candidate("/"), None);
+    }
+
+    #[test]
+    fn php_split_rejects_traversal_in_script_half() {
+        assert_eq!(php_split_candidate("/../evil.php/x"), None);
+        assert_eq!(php_split_candidate("/%2e%2e/evil.php/x"), None);
+        assert_eq!(php_split_candidate("/a%2fb.php/x"), None);
     }
 
     #[test]
