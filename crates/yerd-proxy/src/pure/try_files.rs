@@ -80,8 +80,9 @@ fn resolve_segments(path: &str) -> Option<PathBuf> {
 /// into the candidate script path and the decoded `PATH_INFO` remainder
 /// (always starting with `/`).
 ///
-/// `None` when no segment before the last is PHP source (a plain `/foo.php`
-/// has no remainder and is not a split), or when the script half fails the
+/// `None` when no segment with trailing path data is PHP source (a plain
+/// `/foo.php` has no remainder and is not a split; `/foo.php/` has the
+/// slash-only remainder `/`), or when the script half fails the
 /// same percent-decoding/traversal guard as [`static_candidate`]. Remainder
 /// segments are decoded with the same escapes rule but deliberately allow
 /// `.`/`..` - `PATH_INFO` is opaque data for the script, not a filesystem
@@ -95,12 +96,15 @@ pub fn php_split_candidate(url_path: &str) -> Option<(PathBuf, String)> {
     let trailing_slash = path.len() > 1 && path.ends_with('/');
 
     let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let searchable = if trailing_slash {
+        segments.len()
+    } else {
+        segments.len().saturating_sub(1)
+    };
 
-    // First segment that looks like PHP source, excluding the last: a
-    // trailing PHP segment is the plain exact-match case, not a split.
     let split_at = segments
         .iter()
-        .take(segments.len().saturating_sub(1))
+        .take(searchable)
         .position(|raw| percent_decode(raw).is_some_and(|seg| is_php_source(Path::new(&seg))))?;
 
     let mut script = PathBuf::new();
@@ -309,10 +313,17 @@ mod tests {
                 "/1/lib/javascript-static.js".to_owned()
             ))
         );
-        // Non-greedy: split at the first PHP segment, like nginx's `.+?\.php`.
         assert_eq!(
             php_split_candidate("/a.php/b.php/c"),
             Some((PathBuf::from("a.php"), "/b.php/c".to_owned()))
+        );
+    }
+
+    #[test]
+    fn php_split_yields_slash_only_path_info_for_trailing_slash() {
+        assert_eq!(
+            php_split_candidate("/file.php/"),
+            Some((PathBuf::from("file.php"), "/".to_owned()))
         );
     }
 

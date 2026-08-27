@@ -82,7 +82,7 @@ pub async fn resolve_script(
     }
 
     let Some(dir_rel) = directory_candidate(uri_path) else {
-        return ScriptResolution::Fallback;
+        return split_path_info(uri_path, served_root, &real_root, symlink_protection).await;
     };
     let script_rel = dir_rel.join("index.php");
     match existing_php_file(served_root, &real_root, &script_rel, symlink_protection).await {
@@ -222,6 +222,32 @@ mod tests {
                 PathBuf::from("theme/styles.php"),
                 "/moove/123/all".to_owned()
             )
+        );
+    }
+
+    #[tokio::test]
+    async fn resolves_slash_only_path_info_for_trailing_slash() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("file.php"), b"<?php").unwrap();
+
+        assert_eq!(
+            resolve_script("/file.php/", root.path(), root.path(), true).await,
+            ScriptResolution::ScriptWithPathInfo(PathBuf::from("file.php"), "/".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn resolves_path_info_containing_dot_dot_segments() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("file.php"), b"<?php").unwrap();
+
+        assert_eq!(
+            resolve_script("/file.php/../arg", root.path(), root.path(), true).await,
+            ScriptResolution::ScriptWithPathInfo(PathBuf::from("file.php"), "/../arg".to_owned())
+        );
+        assert_eq!(
+            resolve_script("/file.php/%2e%2e/arg", root.path(), root.path(), true).await,
+            ScriptResolution::ScriptWithPathInfo(PathBuf::from("file.php"), "/../arg".to_owned())
         );
     }
 

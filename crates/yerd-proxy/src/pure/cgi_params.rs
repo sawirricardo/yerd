@@ -62,7 +62,10 @@ pub struct AutoLoginParams<'a> {
 
 /// Build the CGI parameter pairs. `script_rel`, if given, is a real,
 /// on-disk `.php` file's path relative to `document_root` (see the module
-/// doc) - `None` falls back to the root `index.php` policy. `auto_login`, if
+/// doc) - `None` falls back to the root `index.php` policy. `path_info`, if
+/// given, is the decoded remainder of a `PATH_INFO`-style split resolved by
+/// `forward::script_file` and overrides the default `PATH_INFO` value (the
+/// full request path). `auto_login`, if
 /// given, adds a `PHP_VALUE: auto_prepend_file=<path>` param plus a custom
 /// `YERD_LOGIN_USER` param carrying the target username - see
 /// [`AutoLoginParams`].
