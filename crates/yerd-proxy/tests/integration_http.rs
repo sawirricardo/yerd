@@ -1352,7 +1352,7 @@ async fn php_script_with_path_info_forwards_split_to_fcgi() {
         .await;
     });
 
-    let body = client_get(proxy_addr, "lms.test", "/theme/styles.php/moove/123/all").await;
+    let body = client_get(proxy_addr, "lms.test", "/theme/styles.php/moove//123/all").await;
     assert_eq!(body, b"from fpm");
 
     let params = captured.lock().await.clone();
@@ -1373,11 +1373,11 @@ async fn php_script_with_path_info_forwards_split_to_fcgi() {
     );
     assert_eq!(
         params.get("PATH_INFO").map(String::as_str),
-        Some("/moove/123/all")
+        Some("/moove//123/all")
     );
     assert_eq!(
         params.get("REQUEST_URI").map(String::as_str),
-        Some("/theme/styles.php/moove/123/all")
+        Some("/theme/styles.php/moove//123/all")
     );
 
     let _ = tx_shutdown.send(());
