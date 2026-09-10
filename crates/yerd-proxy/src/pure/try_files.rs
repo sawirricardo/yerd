@@ -85,30 +85,29 @@ fn resolve_segments(path: &str) -> Option<PathBuf> {
 /// slash-only remainder `/`), or when the script half fails the
 /// same percent-decoding/traversal guard as [`static_candidate`]. Remainder
 /// segments are decoded with the same escapes rule but deliberately allow
-/// `.`/`..` - `PATH_INFO` is opaque data for the script, not a filesystem
-/// path - while still refusing embedded `/`, `\`, and NUL after decoding. A
-/// trailing `/` on the request survives into the remainder, matching what
-/// nginx's regex captures. The caller must still verify the script half is a
+/// `.`/`..` and empty segments - `PATH_INFO` is opaque data for the script,
+/// not a filesystem path, so `/file.php/a//b/` yields `/a//b/` exactly as
+/// nginx's regex captures it - while still refusing embedded `/`, `\`, and
+/// NUL after decoding. The caller must still verify the script half is a
 /// real, on-disk file before trusting the split.
 #[must_use]
 pub fn php_split_candidate(url_path: &str) -> Option<(PathBuf, String)> {
     let path = url_path.split('?').next().unwrap_or(url_path);
-    let trailing_slash = path.len() > 1 && path.ends_with('/');
+    let components: Vec<&str> = path.split('/').collect();
 
-    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-    let searchable = if trailing_slash {
-        segments.len()
-    } else {
-        segments.len().saturating_sub(1)
-    };
-
-    let split_at = segments
+    let split_at = components
         .iter()
-        .take(searchable)
-        .position(|raw| percent_decode(raw).is_some_and(|seg| is_php_source(Path::new(&seg))))?;
+        .take(components.len().saturating_sub(1))
+        .position(|raw| {
+            !raw.is_empty() && percent_decode(raw).is_some_and(|seg| is_php_source(Path::new(&seg)))
+        })?;
 
     let mut script = PathBuf::new();
-    for raw in segments.get(..=split_at)? {
+    for raw in components
+        .get(..=split_at)?
+        .iter()
+        .filter(|s| !s.is_empty())
+    {
         let seg = percent_decode(raw)?;
         if seg.is_empty() || seg == "." || seg == ".." {
             return None;
@@ -120,16 +119,13 @@ pub fn php_split_candidate(url_path: &str) -> Option<(PathBuf, String)> {
     }
 
     let mut info = String::new();
-    for raw in segments.get(split_at + 1..)? {
+    for raw in components.get(split_at + 1..)? {
         let seg = percent_decode(raw)?;
         if seg.bytes().any(|b| b == b'/' || b == b'\\' || b == 0) {
             return None;
         }
         info.push('/');
         info.push_str(&seg);
-    }
-    if trailing_slash {
-        info.push('/');
     }
 
     Some((script, info))
@@ -324,6 +320,22 @@ mod tests {
         assert_eq!(
             php_split_candidate("/file.php/"),
             Some((PathBuf::from("file.php"), "/".to_owned()))
+        );
+    }
+
+    #[test]
+    fn php_split_preserves_repeated_slashes_in_path_info() {
+        assert_eq!(
+            php_split_candidate("/file.php/a//b"),
+            Some((PathBuf::from("file.php"), "/a//b".to_owned()))
+        );
+        assert_eq!(
+            php_split_candidate("/file.php//"),
+            Some((PathBuf::from("file.php"), "//".to_owned()))
+        );
+        assert_eq!(
+            php_split_candidate("//dir//file.php/x"),
+            Some((PathBuf::from("dir/file.php"), "/x".to_owned()))
         );
     }
 
